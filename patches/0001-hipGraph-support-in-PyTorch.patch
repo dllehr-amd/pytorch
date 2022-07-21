@@ -1,0 +1,437 @@
+From dd2bf66a785dacc7ff0366c615855ee8e4944c1c Mon Sep 17 00:00:00 2001
+From: Douglas Lehr <Doug.Lehr@amd.com>
+Date: Fri, 25 Mar 2022 15:44:23 -0700
+Subject: [PATCH] hipGraph support in PyTorch.
+
+Update PyTorch to support hipGraph when compiling with USE_ROCM enabled.
+
+Key points in change
+1. mcuda to hip mappings added to correctly convert cudaGraph APIs to their
+    hip equivalents.
+2. Add USE_ROCM to cmake for builds in the c10/hip directory
+3. Set default capture mode to cudaStreamCaptureModeRelaxed until
+   the ROCm supports cudaThreadExchangeStreamCaptureMode
+---
+ aten/src/ATen/cuda/CUDAGraph.cpp           | 26 ++++-----
+ aten/src/ATen/cuda/CUDAGraph.h             |  2 +-
+ aten/src/ATen/cuda/CUDAGraphsUtils.cuh     |  2 +-
+ c10/cuda/CUDACachingAllocator.cpp          |  6 +-
+ c10/cuda/CUDAGraphsC10Utils.h              | 10 ++--
+ cmake/Dependencies.cmake                   |  1 +
+ test/test_cuda.py                          | 68 +++++++++++-----------
+ torch/utils/hipify/cuda_to_hip_mappings.py | 16 +++++
+ 8 files changed, 75 insertions(+), 56 deletions(-)
+
+diff --git a/aten/src/ATen/cuda/CUDAGraph.cpp b/aten/src/ATen/cuda/CUDAGraph.cpp
+index b28c276037..398c85d685 100644
+--- a/aten/src/ATen/cuda/CUDAGraph.cpp
++++ b/aten/src/ATen/cuda/CUDAGraph.cpp
+@@ -9,14 +9,14 @@ namespace at {
+ namespace cuda {
+ 
+ MempoolId_t graph_pool_handle() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   // uuid count starts at 1. 0 is reserved to mean "wasn't set by graph_pool_handle".
+   static std::atomic<CaptureId_t> uuid{1};
+   // Sets just the second value, to distinguish it from MempoolId_ts created from
+   // cudaStreamGetCaptureInfo id_s in capture_begin.
+   return {0, uuid++};
+ #else
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3")
+   return {0, 0};
+ #endif
+ }
+@@ -45,13 +45,13 @@ MempoolId_t graph_pool_handle() {
+ CUDAGraph::CUDAGraph()
+   // CUDAStreams may not be default-constructed.
+   : capture_stream_(at::cuda::getCurrentCUDAStream()) {
+-#if (defined(CUDA_VERSION) && CUDA_VERSION < 11000) || defined(USE_ROCM)
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++#if (defined(CUDA_VERSION) && CUDA_VERSION < 11000 && !defined(USE_ROCM)) || (defined(USE_ROCM) && ROCM_VERSION < 50300)
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3");
+ #endif
+ }
+ 
+ void CUDAGraph::capture_begin(MempoolId_t pool/*=0*/) {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   TORCH_CHECK(!has_graph_exec_,
+               "This CUDAGraph instance already owns a captured graph. "
+               "To capture a new graph, create a new instance.");
+@@ -125,7 +125,7 @@ void CUDAGraph::capture_begin(MempoolId_t pool/*=0*/) {
+ }
+ 
+ void CUDAGraph::capture_end() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   auto stream = at::cuda::getCurrentCUDAStream();
+ 
+   TORCH_CHECK(stream == capture_stream_,
+@@ -156,12 +156,12 @@ void CUDAGraph::capture_end() {
+   AT_CUDA_CHECK(cudaGraphDestroy(graph_));
+   has_graph_ = false;
+ #else
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3")
+ #endif
+ }
+ 
+ void CUDAGraph::replay() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   TORCH_CHECK(has_graph_exec_,
+               "Called CUDAGraph::replay without a preceding successful capture.");
+ 
+@@ -190,12 +190,12 @@ void CUDAGraph::replay() {
+     cudaDeviceSynchronize();
+   }
+ #else
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3")
+ #endif
+ }
+ 
+ void CUDAGraph::reset() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   // I'd prefer these checks throw exceptions, not print warnings,
+   // but the destructor calls reset(), and at least one CI build
+   // refuses to compile with a throwing destructor.
+@@ -226,17 +226,17 @@ void CUDAGraph::reset() {
+     C10_CUDA_CHECK_WARN(cudaGraphExecDestroy(graph_exec_));
+   }
+ #else
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3")
+ #endif
+ }
+ 
+ // Returns an id another graph's capture_begin can use to share the same memory pool as this graph.
+ MempoolId_t CUDAGraph::pool() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   TORCH_CHECK(has_graph_exec_,
+               "Called CUDAGraph::pool() without a preceding successful capture.");
+ #else
+-  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 and not yet supported on ROCM");
++  TORCH_CHECK(false, "CUDA graphs may only be used in Pytorch built with CUDA >= 11.0 or ROCM >= 5.3")
+ #endif
+   return mempool_id_;
+ }
+diff --git a/aten/src/ATen/cuda/CUDAGraph.h b/aten/src/ATen/cuda/CUDAGraph.h
+index 09b0b7b5d8..18188a4117 100644
+--- a/aten/src/ATen/cuda/CUDAGraph.h
++++ b/aten/src/ATen/cuda/CUDAGraph.h
+@@ -26,7 +26,7 @@ struct TORCH_CUDA_CPP_API CUDAGraph {
+   MempoolId_t pool();
+ 
+   protected:
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000 || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   cudaGraph_t graph_ = NULL;
+   cudaGraphExec_t graph_exec_ = NULL;
+ #endif
+diff --git a/aten/src/ATen/cuda/CUDAGraphsUtils.cuh b/aten/src/ATen/cuda/CUDAGraphsUtils.cuh
+index 8925e45692..f9aaae72a4 100644
+--- a/aten/src/ATen/cuda/CUDAGraphsUtils.cuh
++++ b/aten/src/ATen/cuda/CUDAGraphsUtils.cuh
+@@ -20,7 +20,7 @@ using CaptureStatus = c10::cuda::CaptureStatus;
+ 
+ // Use this version where you don't want to create a CUDA context if none exists.
+ inline CaptureStatus currentStreamCaptureStatus() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   // don't create a context if we don't have to
+   if (at::cuda::detail::hasPrimaryContext(c10::cuda::current_device())) {
+     return c10::cuda::currentStreamCaptureStatusMayInitCtx();
+diff --git a/c10/cuda/CUDACachingAllocator.cpp b/c10/cuda/CUDACachingAllocator.cpp
+index 49e7f3c3d1..9d20ec2bf0 100644
+--- a/c10/cuda/CUDACachingAllocator.cpp
++++ b/c10/cuda/CUDACachingAllocator.cpp
+@@ -311,12 +311,12 @@ struct MempoolIdHash {
+ };
+ 
+ cudaError_t cudaMallocMaybeCapturing(void** p, size_t size) {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   if (at::cuda::currentStreamCaptureStatusMayInitCtx() ==
+       at::cuda::CaptureStatus::None) {
+ #endif
+     return C10_CUDA_ERROR_HANDLED(cudaMalloc(p, size));
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   } else {
+     // It's ok to capture cudaMallocs, as long as we never cudaFree those
+     // addresses before replay.
+@@ -1067,7 +1067,7 @@ class DeviceCachingAllocator {
+   }
+ 
+   BlockPool& get_pool(size_t size, cudaStream_t stream) {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+     // captures_underway is a conservative guess that the current stream may be
+     // capturing. It's only > 0 if some thread has begun and not yet ended a
+     // capture, so it's usually 0, and we can short-circuit
+diff --git a/c10/cuda/CUDAGraphsC10Utils.h b/c10/cuda/CUDAGraphsC10Utils.h
+index ba8031d3e6..ff4cc79042 100644
+--- a/c10/cuda/CUDAGraphsC10Utils.h
++++ b/c10/cuda/CUDAGraphsC10Utils.h
+@@ -17,7 +17,7 @@ using MempoolId_t = std::pair<CaptureId_t, CaptureId_t>;
+ 
+ // RAII guard for "cudaStreamCaptureMode", a thread-local value
+ // that controls the error-checking strictness of a capture.
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+ struct C10_CUDA_API CUDAStreamCaptureModeGuard {
+   CUDAStreamCaptureModeGuard(cudaStreamCaptureMode desired) {
+     strictness_ = desired;
+@@ -32,7 +32,7 @@ struct C10_CUDA_API CUDAStreamCaptureModeGuard {
+ };
+ #endif
+ 
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+ // Protects against enum cudaStreamCaptureStatus implementation changes.
+ // Some compilers seem not to like static_assert without the messages.
+ static_assert(
+@@ -47,7 +47,7 @@ static_assert(
+ #endif
+ 
+ enum class CaptureStatus : int {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   None = int(cudaStreamCaptureStatus::cudaStreamCaptureStatusNone),
+   Active = int(cudaStreamCaptureStatus::cudaStreamCaptureStatusActive),
+   Invalidated = int(cudaStreamCaptureStatus::cudaStreamCaptureStatusInvalidated)
+@@ -61,7 +61,7 @@ inline std::ostream& operator<<(std::ostream& os, CaptureStatus status) {
+     case CaptureStatus::None:
+       os << "cudaStreamCaptureStatusNone";
+       break;
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+     case CaptureStatus::Active:
+       os << "cudaStreamCaptureStatusActive";
+       break;
+@@ -78,7 +78,7 @@ inline std::ostream& operator<<(std::ostream& os, CaptureStatus status) {
+ 
+ // Use this version where you're sure a CUDA context exists already.
+ inline CaptureStatus currentStreamCaptureStatusMayInitCtx() {
+-#if defined(CUDA_VERSION) && CUDA_VERSION >= 11000
++#if (defined(CUDA_VERSION) && CUDA_VERSION >= 11000) || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
+   cudaStreamCaptureStatus is_capturing;
+   C10_CUDA_CHECK(
+       cudaStreamIsCapturing(c10::cuda::getCurrentCUDAStream(), &is_capturing));
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index f8d1ae74ea..ad474f17f1 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -1286,6 +1286,7 @@ if(USE_ROCM)
+     list(APPEND HIP_CXX_FLAGS -fPIC)
+     list(APPEND HIP_CXX_FLAGS -D__HIP_PLATFORM_HCC__=1)
+     list(APPEND HIP_CXX_FLAGS -DCUDA_HAS_FP16=1)
++    list(APPEND HIP_CXX_FLAGS -DUSE_ROCM)
+     list(APPEND HIP_CXX_FLAGS -D__HIP_NO_HALF_OPERATORS__=1)
+     list(APPEND HIP_CXX_FLAGS -D__HIP_NO_HALF_CONVERSIONS__=1)
+     list(APPEND HIP_CXX_FLAGS -DTORCH_HIP_VERSION=${TORCH_HIP_VERSION})
+diff --git a/test/test_cuda.py b/test/test_cuda.py
+index c5c4c42248..c9eb3bb099 100644
+--- a/test/test_cuda.py
++++ b/test/test_cuda.py
+@@ -45,6 +45,7 @@ if not TEST_CUDA:
+ 
+ TEST_LARGE_TENSOR = TEST_CUDA
+ TEST_MEDIUM_TENSOR = TEST_CUDA
++TEST_GRAPH = TEST_CUDA
+ TEST_CUDNN = TEST_CUDA
+ TEST_BF16 = False
+ if TEST_CUDA:
+@@ -54,6 +55,8 @@ if TEST_CUDA:
+     TEST_LARGE_TENSOR = torch.cuda.get_device_properties(0).total_memory >= 12e9
+     TEST_MEDIUM_TENSOR = torch.cuda.get_device_properties(0).total_memory >= 6e9
+     TEST_BF16 = torch.cuda.is_bf16_supported()
++    TEST_GRAPH = (torch.version.cuda and int(torch.version.cuda.split(".")[0]) >= 11) or (torch.version.hip and float(".".join(torch.version.hip.split(".")[0:2])) >= 5.3)
++
+ 
+ 
+ def make_sparse_tensor(t, n, *sizes):
+@@ -3106,9 +3109,21 @@ torch.cuda.synchronize()
+     def test_to_numpy(self):
+         self.assertRaises(TypeError, lambda: torch.empty(1, device="cuda").numpy())
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
++    def test_graph_is_current_stream_capturing(self):
++        self.assertFalse(torch.cuda.is_current_stream_capturing())
++
++        if (TEST_GRAPH):
++            s = torch.cuda.Stream()
++            with torch.cuda.stream(s):
++                g = torch.cuda.CUDAGraph()
++                self.assertFalse(torch.cuda.is_current_stream_capturing())
++                g.capture_begin()
++                self.assertTrue(torch.cuda.is_current_stream_capturing())
++                g.capture_end()
++
++
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_capture_simple(self):
+         s = torch.cuda.Stream()
+ 
+@@ -3127,9 +3142,13 @@ torch.cuda.synchronize()
+ 
+         self.assertTrue(b.sum().item() == 11000.)
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
++    def test_graph_capture_oom(self):
++        with self.assertRaisesRegex(RuntimeError, "out of memory"):
++            with torch.cuda.graph(torch.cuda.CUDAGraph()):
++                torch.zeros(2 ** 40, device="cuda")
++
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_rng_functional(self):
+         ops_with_kwargs = ((torch.nn.functional.dropout, {"p": 0.1}),
+                            (torch.nn.functional.rrelu, {"training": True}),)
+@@ -3183,9 +3202,7 @@ torch.cuda.synchronize()
+         for op, kwargs in ops_with_kwargs:
+             run(op, kwargs)
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_rng_distributions(self):
+         size = 10000
+         input = torch.rand((size,), device="cuda", dtype=torch.float)
+@@ -3287,9 +3304,7 @@ torch.cuda.synchronize()
+             # Adds an empty dict for kwargs, which none of the Tensor methods use
+             run("Tensor", *(meth_with_args + ({},)))
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_two_successive(self):
+         torch.cuda.empty_cache()
+ 
+@@ -3352,9 +3367,7 @@ torch.cuda.synchronize()
+ 
+     @unittest.skip("Temporarily disabled due to a graphs bug in libcuda.so, " +
+                    "see https://github.com/pytorch/pytorch/pull/57556")
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_concurrent_replay(self):
+         torch.cuda.empty_cache()
+ 
+@@ -3419,9 +3432,7 @@ torch.cuda.synchronize()
+             torch.cuda.synchronize()
+             torch.cuda.empty_cache()
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_three_successive(self):
+         torch.cuda.empty_cache()
+ 
+@@ -3480,9 +3491,7 @@ torch.cuda.synchronize()
+             torch.cuda.synchronize()
+             torch.cuda.empty_cache()
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_memory_stats_and_use_result_after_destroy_graph(self):
+         kSmallSize = 1048576
+         kSmallBuffer = 2097152
+@@ -3585,9 +3594,7 @@ torch.cuda.synchronize()
+             torch.cuda.synchronize()
+             torch.cuda.empty_cache()
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_record_stream(self):
+         # Makes sure graph capture defers attempting to reclaim allocations used across streams. See
+         # "Q. Why skip process_events if a capture might be underway?" in c10/cuda/CUDACachingAllocator.cpp
+@@ -3627,9 +3634,7 @@ torch.cuda.synchronize()
+         # dummy allocation triggers process_events, Hopefully successfully processes b's end-of-life event.
+         c = torch.zeros((3,), device="cuda")
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     # If this test is the first in the process to try cudnn rnns with dropout, it'll initialize
+     # DropoutState's long-lived internal buffer. Calling code perceives this (correct) behavior
+     # as a memory leak unless we skip the leak check.
+@@ -3656,9 +3661,7 @@ torch.cuda.synchronize()
+ 
+         y = model(x)
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_grad_scaling(self):
+         torch.cuda.empty_cache()
+ 
+@@ -3705,9 +3708,8 @@ torch.cuda.synchronize()
+             self.assertEqual(scaler._scale, scale)
+             self.assertEqual(scaler._growth_tracker, growth_tracker)
+ 
+-    @unittest.skipIf((not TEST_CUDA) or
+-                     TEST_WITH_ROCM or
+-                     int(torch.version.cuda.split(".")[0]) < 11, "CUDA >= 11.0 required for graphs")
++    @skipIfRocm
++    @unittest.skipIf((not TEST_GRAPH), "CUDA >= 11.0 or ROCM >= 5.3 required for graphs")
+     def test_graph_make_graphed_callables(self):
+         torch.manual_seed(5)
+         torch.cuda.manual_seed(5)
+diff --git a/torch/utils/hipify/cuda_to_hip_mappings.py b/torch/utils/hipify/cuda_to_hip_mappings.py
+index 73e3bc2182..8c6bbaefff 100644
+--- a/torch/utils/hipify/cuda_to_hip_mappings.py
++++ b/torch/utils/hipify/cuda_to_hip_mappings.py
+@@ -529,6 +529,8 @@ CUDA_TYPE_NAME_MAP = collections.OrderedDict(
+         ("curandStateXORWOW_t", ("hiprandStateXORWOW_t", CONV_TYPE, API_RAND)),
+         ("curandState_t", ("hiprandState_t", CONV_TYPE, API_RAND)),
+         ("curandState", ("hiprandState_t", CONV_TYPE, API_RAND)),
++        ("cudaGraph_t", ("hipGraph_t", CONV_TYPE, API_RAND)),
++        ("cudaGraphExec_t", ("hipGraphExec_t", CONV_TYPE, API_RAND)),
+     ]
+ )
+ 
+@@ -4096,6 +4098,20 @@ CUDA_IDENTIFIER_MAP = collections.OrderedDict(
+         ),
+         ("cudaStreamDefault", ("hipStreamDefault", CONV_TYPE, API_RUNTIME)),
+         ("cudaStreamNonBlocking", ("hipStreamNonBlocking", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamGetCaptureInfo", ("hipStreamGetCaptureInfo", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamCaptureStatus", ("hipStreamCaptureStatus", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamCaptureStatusActive", ("hipStreamCaptureStatusActive", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamCaptureMode", ("hipStreamCaptureMode", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamCaptureModeGlobal", ("hipStreamCaptureModeGlobal", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamCaptureModeRelaxed", ("hipStreamCaptureModeRelaxed", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamBeginCapture", ("hipStreamBeginCapture", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamEndCapture", ("hipStreamEndCapture", CONV_TYPE, API_RUNTIME)),
++        ("cudaGraphInstantiate", ("hipGraphInstantiate", CONV_TYPE, API_RUNTIME)),
++        ("cudaGraphDestroy", ("hipGraphDestroy", CONV_TYPE, API_RUNTIME)),
++        ("cudaGraphExecDestroy", ("hipGraphExecDestroy", CONV_TYPE, API_RUNTIME)),
++        ("cudaGraphLaunch", ("hipGraphLaunch", CONV_TYPE, API_RUNTIME)),
++        ("cudaThreadExchangeStreamCaptureMode", ("hipThreadExchangeStreamCaptureMode", CONV_TYPE, API_RUNTIME)),
++        ("cudaStreamIsCapturing", ("hipStreamIsCapturing", CONV_TYPE, API_RUNTIME)),
+         ("cudaDeviceSynchronize", ("hipDeviceSynchronize", CONV_DEVICE, API_RUNTIME)),
+         ("cudaDeviceReset", ("hipDeviceReset", CONV_DEVICE, API_RUNTIME)),
+         ("cudaSetDevice", ("hipSetDevice", CONV_DEVICE, API_RUNTIME)),
+-- 
+2.25.1
+
