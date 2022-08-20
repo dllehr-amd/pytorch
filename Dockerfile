@@ -9,6 +9,6 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v3.22.2/cmake-3.22.2
     make && \
     make install
 
-COPY patches . 
+COPY patches ./patches 
 COPY run.sh .
 RUN ./run.sh
