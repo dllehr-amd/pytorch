@@ -28,6 +28,7 @@ from torch.testing._internal.common_utils import (
     skipIfTorchDynamo,
     suppress_warnings,
     TestCase,
+    TEST_WITH_ROCM,
 )
 from torch.testing._internal.inductor_utils import HAS_CPU, HAS_CUDA
 
@@ -179,6 +180,11 @@ inductor_skips["cuda"] = {
     "fft.rfft": {f16, f32, f64, b8, i32, i64},
     "fft.rfft2": {f16, f32, f64},
     "fft.rfftn": {f16, f32, f64},
+}
+
+inductor_skips_rocm["cuda"] = {
+    "cummax": {f16, f32},
+    "cummin": {f16, f32},
 }
 
 inductor_expected_failures_single_sample = defaultdict(dict)
@@ -463,6 +469,9 @@ class TestInductorOpInfo(TestCase):
             #     print(f"SKIPPING OP {op_name} on {device_type}", flush=True, file=f)
             #     print(f"SKIPPING OP {op_name} on {device_type}", flush=True)
             self.skipTest(f"{op_name} in {dtype} not supported")
+        elif TEST_WITH_ROCM and dtype in inductor_skips_rocm[device_type].get(op_name, set()):
+            test_expect = TestExpect.SKIP
+            self.skipTest(f"{op_name} in {dtype} not supported on ROCM")
         elif dtype in inductor_expected_failures_single_sample[device_type].get(
             op_name, set()
         ) or dtype in inductor_gradient_expected_failures_single_sample[
