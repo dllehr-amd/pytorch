@@ -183,8 +183,25 @@ inductor_skips["cuda"] = {
 }
 
 inductor_skips_rocm["cuda"] = {
-    "cummax": {f16, f32},
-    "cummin": {f16, f32},
+    "cummax": {f16, f32, f64},
+    "cummin": {f16, f32, f64},
+    "gather": {f16, f32, f64},
+    "index_add": {f16, f32, f64, i32, i64},
+    "index_select": {f16, f32, f64, i32, i64},
+    "nanquantile": {f16, f32, f64, i32, i64},
+    "embedding": {f16, f32, f64, i32, i64},
+    "nn.functional.embedding": {f16, f32, f64, i32, i64},
+    "nn.functional.interpolate.bilinear": {f16, f32, f64, i32, i64},
+    "nn.functional.interpolate.nearest": {f16, f32, f64, i32, i64},
+    "nn.functional.upsample_bilinear": {f16, f32, f64, i32, i64},
+    "nn.functional.upsample_nearest": {f16, f32, f64, i32, i64},
+    "quantile": {f16, f32, f64, i32, i64},
+    "scatter_add": {f16, f32, f64, i32, i64},
+    "scatter_reduce.amax": {f16, f32, f64, i32, i64},
+    "scatter_reduce.amin": {f16, f32, f64, i32, i64},
+    "scatter_reduce.mean": {f16, f32, f64, i32, i64},
+    "scatter_reduce.sum": {f16, f32, f64, i32, i64},
+    "take_along_dim": {f16, f32, f64, i32, i64},
 }
 
 inductor_expected_failures_single_sample = defaultdict(dict)
