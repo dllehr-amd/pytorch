@@ -10,7 +10,6 @@
 #include <ATen/cuda/Exceptions.h>
 #include <ATen/cuda/PeerToPeerAccess.h>
 #include <ATen/cuda/PinnedMemoryAllocator.h>
-#include <ATen/cuda/UvmMemoryAllocator.h>
 #include <ATen/cuda/nvrtc_stub/ATenNVRTC.h>
 #include <ATen/detail/CUDAHooksInterface.h>
 #include <ATen/native/cuda/CuFFTPlanCache.h>
