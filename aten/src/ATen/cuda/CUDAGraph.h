@@ -24,7 +24,9 @@ struct TORCH_CUDA_CPP_API CUDAGraph {
   void replay();
   void reset();
   MempoolId_t pool();
-
+  void enable_debug_mode();
+  void debug_dump(const std::string& debug_path);
+  
   protected:
 #if defined(CUDA_VERSION) && CUDA_VERSION >= 11000 || (defined(USE_ROCM) && ROCM_VERSION >= 50300)
   cudaGraph_t graph_ = NULL;

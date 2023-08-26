@@ -90,6 +90,21 @@ class CUDAGraph(torch._C._CUDAGraph):
         """
         return super(CUDAGraph, self).pool()
 
+    def enable_debug_mode(self):
+        r"""
+        Enables debugging mode for CUDAGraph.debug_dump.
+        """
+        return super().enable_debug_mode()
+
+    def debug_dump(self, debug_path):
+        r"""
+        Arguments:
+            debug_path (required): Path to dump the graph to.
+
+        Calls a debugging function to dump the graph if the debugging is
+        enabled via CUDAGraph.enable_debug_mode()
+        """
+        return super().debug_dump(debug_path)
 
 class graph(object):
     r"""
