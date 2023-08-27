@@ -5,7 +5,7 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/csrc/utils/pybind.h>
 
-#include <ATen/hip/HIPGraph.h>
+#include <ATen/cuda/CUDAGraph.h>
 
 // Cargo culted partially from csrc/distributed/c10d/init.cpp
 // and partially from csrc/cuda/Stream.cpp.
@@ -35,7 +35,7 @@ void THCPGraph_init(PyObject *module) {
       .def("capture_begin",
            &::at::cuda::CUDAGraph::capture_begin,
            py::call_guard<py::gil_scoped_release>(),
-           py::arg("pool") = c10::hip::MempoolId_t{0, 0})
+           py::arg("pool") = c10::cuda::MempoolId_t{0, 0})
       .def("capture_end",
            &::at::cuda::CUDAGraph::capture_end,
            py::call_guard<py::gil_scoped_release>())
